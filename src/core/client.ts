@@ -268,6 +268,32 @@ export class GatewayClient {
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       if (!this.ws || this._connectionState !== "connected") {
+        // If autoReconnect is enabled, wait up to 5s for reconnection
+        // instead of immediately rejecting. This prevents transient
+        // "Not connected" errors during WS flaps (e.g. group chat fan-out).
+        if (this.options.autoReconnect !== false && this._connectionState !== "disconnected") {
+          const waitTimeout = 5000;
+          let settled = false;
+          const unsub = this.onConnectionStateChange((state) => {
+            if (settled) return;
+            if (state === "connected") {
+              settled = true;
+              unsub();
+              this.request<T>(method, params, timeoutMs).then(resolve, reject);
+            } else if (state === "disconnected") {
+              settled = true;
+              unsub();
+              reject(new Error("Not connected"));
+            }
+          });
+          setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            unsub();
+            reject(new Error("Not connected"));
+          }, waitTimeout);
+          return;
+        }
         return reject(new Error("Not connected"));
       }
 
@@ -699,7 +725,6 @@ export class GatewayClient {
 
     if (payload.decision === "approved") {
       // Retry connect now that we're approved
-      console.log("[GatewayClient] Device approved, retrying connect...");
       this.sendConnectFrame();
     } else {
       // Rejected - fail the connection
